@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MNIST Exploration Dashboard</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>MNIST Exploration Dashboard</h1>
+            <div id="stats"></div>
+        </header>
+
+        <main>
+            <div id="left-panel">
+                <section id="treemap-section">
+                    <div class="section-header">
+                        <h2>Model Clusters</h2>
+                        <div id="treemap-breadcrumb"></div>
+                    </div>
+                    <div id="treemap"></div>
+                </section>
+
+                <section id="correlation-section">
+                    <h2>Digit Correlation</h2>
+                    <div id="correlation"></div>
+                </section>
+            </div>
+
+            <div id="center-panel">
+                <section id="image-grid-section">
+                    <div class="section-header">
+                        <h2>Images</h2>
+                        <div id="filters">
+                            <select id="digit-filter">
+                                <option value="all">All Digits</option>
+                                <option value="0">0</option>
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                                <option value="5">5</option>
+                                <option value="6">6</option>
+                                <option value="7">7</option>
+                                <option value="8">8</option>
+                                <option value="9">9</option>
+                            </select>
+                            <select id="sort-by">
+                                <option value="difficulty-asc">Hardest First</option>
+                                <option value="difficulty-desc">Easiest First</option>
+                                <option value="digit">By Digit</option>
+                                <option value="id">By Index</option>
+                            </select>
+                            <input type="range" id="difficulty-range" min="0" max="100" value="0">
+                            <span id="difficulty-label">Min difficulty: 0%</span>
+                        </div>
+                    </div>
+                    <div id="image-grid"></div>
+                </section>
+            </div>
+
+            <div id="right-panel">
+                <section id="details-section">
+                    <h2>Details</h2>
+                    <div id="details">
+                        <p class="placeholder">Click an image to see details</p>
+                    </div>
+                </section>
+
+                <section id="model-stats-section">
+                    <h2>Model Performance</h2>
+                    <div id="model-stats"></div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <div id="tooltip" class="hidden"></div>
+
+    <script src="js/main.js" type="module"></script>
+</body>
+</html>
