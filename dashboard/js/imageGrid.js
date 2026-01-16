@@ -17,13 +17,30 @@ export function createImageGrid(container, state, events, tooltip) {
             render();
         });
 
+        events.on('model-filter', (modelId) => {
+            render();
+        });
+
         events.on('image-select', (imgIdx) => {
             updateSelection(imgIdx);
+        });
+
+        events.on('checkpoint-change', (data) => {
+            highlightCheckpointCorrect(data);
         });
     }
 
     function getFilteredAndSortedImages() {
-        let images = [...state.data.test_images];
+        let images = [...state.data.images];
+
+        // Apply model filter - show only training images for this model
+        if (state.filters.modelId !== undefined) {
+            const model = state.data.models[state.filters.modelId];
+            if (model) {
+                const trainingSet = new Set(model.training_indices);
+                images = images.filter(img => trainingSet.has(img.id));
+            }
+        }
 
         // Apply digit filter from correlation matrix
         if (digitFilter) {
@@ -132,6 +149,25 @@ export function createImageGrid(container, state, events, tooltip) {
             const id = parseInt(imgEl.dataset.id);
             imgEl.classList.toggle('highlighted', state.highlightedImages.has(id));
             imgEl.classList.toggle('dimmed', imageIds.length > 0 && !state.highlightedImages.has(id));
+        });
+    }
+
+    // Highlight based on checkpoint correctness
+    function highlightCheckpointCorrect(data) {
+        const { sampleCorrect } = data;
+        el.querySelectorAll('.grid-image').forEach(imgEl => {
+            const id = parseInt(imgEl.dataset.id);
+            const correct = sampleCorrect[id];
+
+            // Remove previous checkpoint highlighting
+            imgEl.classList.remove('checkpoint-correct', 'checkpoint-wrong');
+
+            // Add checkpoint-specific styling
+            if (correct) {
+                imgEl.classList.add('checkpoint-correct');
+            } else {
+                imgEl.classList.add('checkpoint-wrong');
+            }
         });
     }
 

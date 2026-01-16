@@ -16,7 +16,7 @@ export function createDetailsPanel(container, state, events) {
             return;
         }
 
-        const img = state.data.test_images[imgIdx];
+        const img = state.data.images[imgIdx];
         if (!img) {
             el.innerHTML = '<p class="placeholder">Image not found</p>';
             return;
@@ -34,7 +34,7 @@ export function createDetailsPanel(container, state, events) {
         }
 
         // Find similar images (same digit, similar difficulty)
-        const similar = state.data.test_images
+        const similar = state.data.images
             .filter(other => other.id !== img.id && other.digit === img.digit)
             .sort((a, b) => Math.abs(a.difficulty - img.difficulty) - Math.abs(b.difficulty - img.difficulty))
             .slice(0, 8);
@@ -103,29 +103,59 @@ export function createDetailsPanel(container, state, events) {
     function renderModelStats() {
         const models = state.data.models;
 
-        // Sort by accuracy
-        const sortedModels = [...models].sort((a, b) => b.test_accuracy - a.test_accuracy);
+        // Create sort selector if it doesn't exist
+        if (!document.getElementById('model-sort-select')) {
+            const sortContainer = document.createElement('div');
+            sortContainer.style.marginBottom = '0.5rem';
+            sortContainer.style.fontSize = '0.75rem';
+            sortContainer.innerHTML = `
+                <select id="model-sort-select" style="font-size: 0.75rem; padding: 0.25rem; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; width: 100%;">
+                    <option value="acc-desc">Accuracy: High to Low</option>
+                    <option value="acc-asc">Accuracy: Low to High</option>
+                    <option value="id-asc">Model ID: Ascending</option>
+                    <option value="id-desc">Model ID: Descending</option>
+                </select>
+            `;
+            modelStatsEl.parentElement.insertBefore(sortContainer, modelStatsEl);
 
-        modelStatsEl.innerHTML = `
-            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
-                Sorted by test accuracy
+            document.getElementById('model-sort-select').addEventListener('change', renderModelStats);
+        }
+
+        const sortBy = document.getElementById('model-sort-select').value;
+        let sortedModels = [...models];
+
+        switch (sortBy) {
+            case 'acc-desc':
+                sortedModels.sort((a, b) => b.test_accuracy - a.test_accuracy);
+                break;
+            case 'acc-asc':
+                sortedModels.sort((a, b) => a.test_accuracy - b.test_accuracy);
+                break;
+            case 'id-asc':
+                sortedModels.sort((a, b) => a.id - b.id);
+                break;
+            case 'id-desc':
+                sortedModels.sort((a, b) => b.id - a.id);
+                break;
+        }
+
+        modelStatsEl.innerHTML = sortedModels.map(m => `
+            <div class="model-stat-row" onclick="window.highlightModelImages(${m.id})" style="cursor: pointer;">
+                <span>Model ${m.id}</span>
+                <span style="color: ${m.test_accuracy > 0.5 ? 'var(--success)' : m.test_accuracy > 0.3 ? 'var(--warning)' : 'var(--error)'}">
+                    ${(m.test_accuracy * 100).toFixed(1)}%
+                </span>
             </div>
-            ${sortedModels.slice(0, 20).map(m => `
-                <div class="model-stat-row" onclick="window.highlightModelImages(${m.id})" style="cursor: pointer;">
-                    <span>Model ${m.id}</span>
-                    <span style="color: ${m.test_accuracy > 0.5 ? 'var(--success)' : m.test_accuracy > 0.3 ? 'var(--warning)' : 'var(--error)'}">
-                        ${(m.test_accuracy * 100).toFixed(1)}%
-                    </span>
-                </div>
-            `).join('')}
-            ${models.length > 20 ? `<div style="text-align: center; color: #888; font-size: 0.75rem; padding: 0.5rem;">+${models.length - 20} more models</div>` : ''}
-        `;
+        `).join('');
     }
 
-    // Global function to highlight a model's training images
+    // Global function to highlight and filter to a model's training images
     window.highlightModelImages = function(modelId) {
         const model = state.data.models[modelId];
         if (model) {
+            // Set filter to show only this model's training images
+            state.filters.modelId = modelId;
+            events.emit('model-filter', modelId);
             events.emit('highlight-images', model.training_indices);
         }
     };

@@ -18,10 +18,15 @@
             <div id="left-panel">
                 <section id="treemap-section">
                     <div class="section-header">
-                        <h2>Model Clusters</h2>
+                        <h2>Model Overview</h2>
                         <div id="treemap-breadcrumb"></div>
                     </div>
                     <div id="treemap"></div>
+                </section>
+
+                <section id="model-stats-section">
+                    <h2>Top Models</h2>
+                    <div id="model-stats"></div>
                 </section>
 
                 <section id="correlation-section">
@@ -35,6 +40,7 @@
                     <div class="section-header">
                         <h2>Images</h2>
                         <div id="filters">
+                            <span id="active-filter" style="font-size: 0.8rem; color: var(--accent);"></span>
                             <select id="digit-filter">
                                 <option value="all">All Digits</option>
                                 <option value="0">0</option>
@@ -56,6 +62,7 @@
                             </select>
                             <input type="range" id="difficulty-range" min="0" max="100" value="0">
                             <span id="difficulty-label">Min difficulty: 0%</span>
+                            <button id="clear-filters" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); cursor: pointer;">Clear</button>
                         </div>
                     </div>
                     <div id="image-grid"></div>
@@ -63,6 +70,16 @@
             </div>
 
             <div id="right-panel">
+                <section id="training-curves-section">
+                    <div class="section-header">
+                        <h2>Training Curves</h2>
+                        <select id="model-selector" style="font-size: 0.8rem; padding: 0.25rem; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px;">
+                            <option value="">Select model...</option>
+                        </select>
+                    </div>
+                    <div id="training-curves"></div>
+                </section>
+
                 <section id="details-section">
                     <h2>Details</h2>
                     <div id="details">
@@ -70,15 +87,45 @@
                     </div>
                 </section>
 
-                <section id="model-stats-section">
-                    <h2>Model Performance</h2>
-                    <div id="model-stats"></div>
+                <section id="checkpoint-section">
+                    <div class="section-header">
+                        <h2>Checkpoint Explorer</h2>
+                        <input type="range" id="checkpoint-slider" min="0" max="0" value="0" style="width: 100%;" disabled>
+                    </div>
+                    <div id="checkpoint-info" style="font-size: 0.8rem; color: var(--text-secondary);">
+                        Select a model to explore checkpoints
+                    </div>
                 </section>
             </div>
         </main>
     </div>
 
     <div id="tooltip" class="hidden"></div>
+
+    <!-- Modal containers -->
+    <div id="model-overview-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Model Overview</h2>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="model-overview-expanded"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="training-curves-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Training Curves</h2>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="training-curves-expanded"></div>
+            </div>
+        </div>
+    </div>
 
     <script src="js/main.js" type="module"></script>
 </body>
