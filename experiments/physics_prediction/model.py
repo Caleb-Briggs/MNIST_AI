@@ -18,15 +18,19 @@ from typing import Optional
 class RMSNorm(nn.Module):
     """Root Mean Square Normalization (faster than LayerNorm)."""
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-8):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # RMS = sqrt(mean(x^2))
+        # Use float32 for stability in mixed precision
+        dtype = x.dtype
+        x = x.float()
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        return x / rms * self.weight
+        x = x / rms * self.weight.float()
+        return x.to(dtype)
 
 
 class RotaryPositionEmbedding(nn.Module):
@@ -45,7 +49,7 @@ class RotaryPositionEmbedding(nn.Module):
         self._build_cache(max_seq_len)
 
     def _build_cache(self, seq_len: int):
-        positions = torch.arange(seq_len, dtype=torch.float)
+        positions = torch.arange(seq_len, dtype=torch.float, device=self.inv_freq.device)
         freqs = torch.outer(positions, self.inv_freq)  # (seq_len, dim/2)
 
         # Create cos and sin caches
@@ -54,6 +58,7 @@ class RotaryPositionEmbedding(nn.Module):
 
         self.register_buffer('cos_cache', cos_cache, persistent=False)
         self.register_buffer('sin_cache', sin_cache, persistent=False)
+        self.max_seq_len = seq_len  # Update max_seq_len
 
     def forward(self, x: torch.Tensor, offset: int = 0) -> torch.Tensor:
         """
@@ -155,8 +160,9 @@ class Attention(nn.Module):
                 diagonal=1
             )
 
-        attn_weights = attn_weights.masked_fill(mask, float('-inf'))
+        attn_weights = attn_weights.masked_fill(mask, -1e9)  # Use large negative instead of -inf for numerical stability
         attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)  # Safety: replace any NaN with 0
         attn_weights = self.dropout(attn_weights)
 
         # Apply attention to values
@@ -246,12 +252,13 @@ class VideoPredictor(nn.Module):
                 if module.bias is not None:
                     torch.nn.init.zeros_(module.bias)
 
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
+    def forward(self, frames: torch.Tensor, padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Predict next frame from context frames.
 
         Args:
             frames: (batch, seq_len, H, W) or (batch, seq_len, 1, H, W)
+            padding_mask: (batch, seq_len) bool tensor, True = padded position to ignore
 
         Returns:
             (batch, H, W) - predicted next frame
@@ -265,9 +272,26 @@ class VideoPredictor(nn.Module):
         # Flatten frames to vectors: (batch, seq_len, frame_dim)
         x = frames.view(batch, seq_len, -1)
 
+        # Build attention mask: combine causal mask with padding mask
+        # Causal mask: (seq_len, seq_len), True = mask out
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+            diagonal=1
+        )
+
+        if padding_mask is not None:
+            # Expand padding mask: if position j is padded, mask it for all queries
+            # padding_mask: (batch, seq_len) -> (batch, 1, 1, seq_len)
+            pad_mask = padding_mask.unsqueeze(1).unsqueeze(2)  # (batch, 1, 1, seq_len)
+            # Combine: mask if causal OR if key position is padded
+            # causal_mask: (seq_len, seq_len) -> (1, 1, seq_len, seq_len)
+            combined_mask = causal_mask.unsqueeze(0).unsqueeze(0) | pad_mask
+        else:
+            combined_mask = causal_mask
+
         # Pass through transformer blocks
         for block in self.blocks:
-            x = block(x)
+            x = block(x, combined_mask)
 
         # Final norm and projection
         x = self.norm(x)
