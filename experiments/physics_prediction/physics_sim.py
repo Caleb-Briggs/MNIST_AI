@@ -291,12 +291,34 @@ def generate_trajectory(
     return np.array(frames)
 
 
+def _rects_overlap(x1, y1, w1, h1, x2, y2, w2, h2, margin: float = 0) -> bool:
+    """Check if two rectangles overlap (with optional margin)."""
+    return not (x1 + w1 + margin < x2 or
+                x2 + w2 + margin < x1 or
+                y1 + h1 + margin < y2 or
+                y2 + h2 + margin < y1)
+
+
+def _circle_rect_overlap(cx, cy, radius, rx, ry, rw, rh, margin: float = 0) -> bool:
+    """Check if a circle overlaps with a rectangle (with optional margin)."""
+    # Expand rectangle by radius + margin, then check if center is inside
+    expanded_x = rx - radius - margin
+    expanded_y = ry - radius - margin
+    expanded_w = rw + 2 * (radius + margin)
+    expanded_h = rh + 2 * (radius + margin)
+
+    return (expanded_x <= cx <= expanded_x + expanded_w and
+            expanded_y <= cy <= expanded_y + expanded_h)
+
+
 def generate_random_barriers(
     num_barriers: int,
     width: int = 64,
     height: int = 64,
     min_size: int = 5,
     max_size: int = 15,
+    margin: float = 2.0,
+    exclude_ball: Optional[Tuple[float, float, float]] = None,
     seed: Optional[int] = None
 ) -> List[Barrier]:
     """
@@ -308,6 +330,8 @@ def generate_random_barriers(
         height: Simulation height
         min_size: Minimum barrier dimension
         max_size: Maximum barrier dimension
+        margin: Minimum spacing between barriers
+        exclude_ball: (x, y, radius) of ball to avoid, or None
         seed: Random seed
 
     Returns:
@@ -318,30 +342,40 @@ def generate_random_barriers(
 
     barriers = []
     max_attempts = 100
+    edge_margin = 5  # Keep barriers away from edges
 
     for _ in range(num_barriers):
+        placed = False
         for attempt in range(max_attempts):
             # Random size and position
             w = np.random.randint(min_size, max_size + 1)
             h = np.random.randint(min_size, max_size + 1)
-            x = np.random.uniform(5, width - w - 5)
-            y = np.random.uniform(5, height - h - 5)
+            x = np.random.uniform(edge_margin, width - w - edge_margin)
+            y = np.random.uniform(edge_margin, height - h - edge_margin)
 
-            new_barrier = Barrier(x, y, w, h)
-
-            # Check overlap
+            # Check overlap with existing barriers (including margin)
             overlap = False
             for existing in barriers:
-                if not (new_barrier.right < existing.x or
-                       new_barrier.x > existing.right or
-                       new_barrier.top < existing.y or
-                       new_barrier.y > existing.top):
+                if _rects_overlap(x, y, w, h,
+                                  existing.x, existing.y, existing.width, existing.height,
+                                  margin=margin):
                     overlap = True
                     break
 
+            # Check overlap with ball exclusion zone
+            if not overlap and exclude_ball is not None:
+                ball_x, ball_y, ball_radius = exclude_ball
+                if _circle_rect_overlap(ball_x, ball_y, ball_radius, x, y, w, h, margin=margin):
+                    overlap = True
+
             if not overlap:
-                barriers.append(new_barrier)
+                barriers.append(Barrier(x, y, w, h))
+                placed = True
                 break
+
+        if not placed:
+            # Could not place this barrier, continue with fewer barriers
+            pass
 
     return barriers
 
@@ -351,6 +385,8 @@ def create_random_simulation(
     with_gravity: bool = False,
     width: int = 64,
     height: int = 64,
+    ball_radius: float = 3.0,
+    barrier_margin: float = 2.0,
     seed: Optional[int] = None
 ) -> PhysicsSimulation:
     """
@@ -361,6 +397,8 @@ def create_random_simulation(
         with_gravity: Whether to include gravity
         width: Simulation width
         height: Simulation height
+        ball_radius: Radius of the ball
+        barrier_margin: Minimum spacing between barriers and ball
         seed: Random seed
 
     Returns:
@@ -369,27 +407,20 @@ def create_random_simulation(
     if seed is not None:
         np.random.seed(seed)
 
-    # Generate barriers
-    barriers = generate_random_barriers(num_barriers, width, height, seed=seed)
+    # Generate ball position first
+    edge_margin = ball_radius + 5
+    ball_x = np.random.uniform(edge_margin, width - edge_margin)
+    ball_y = np.random.uniform(edge_margin, height - edge_margin)
 
-    # Find valid ball position (not inside barriers)
-    max_attempts = 100
-    ball_radius = 3.0
-
-    for _ in range(max_attempts):
-        ball_x = np.random.uniform(10, width - 10)
-        ball_y = np.random.uniform(10, height - 10)
-
-        # Check if ball overlaps with any barrier
-        valid = True
-        for barrier in barriers:
-            if (barrier.x - ball_radius <= ball_x <= barrier.right + ball_radius and
-                barrier.y - ball_radius <= ball_y <= barrier.top + ball_radius):
-                valid = False
-                break
-
-        if valid:
-            break
+    # Generate barriers that avoid the ball position
+    barriers = generate_random_barriers(
+        num_barriers,
+        width,
+        height,
+        margin=barrier_margin,
+        exclude_ball=(ball_x, ball_y, ball_radius),
+        seed=None  # Don't reset seed, already set above
+    )
 
     # Create ball
     ball = Ball(
