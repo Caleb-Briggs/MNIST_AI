@@ -271,7 +271,8 @@ class PhysicsSimulation:
 def generate_trajectory(
     sim: PhysicsSimulation,
     num_frames: int,
-    resolution: int = 64
+    resolution: int = 64,
+    dt: float = 1.0
 ) -> np.ndarray:
     """
     Generate trajectory by running simulation.
@@ -280,6 +281,7 @@ def generate_trajectory(
         sim: PhysicsSimulation instance
         num_frames: Number of frames to generate
         resolution: Frame resolution
+        dt: Time step per frame (larger = faster motion)
 
     Returns:
         np.ndarray: Shape (num_frames, H, W)
@@ -287,7 +289,7 @@ def generate_trajectory(
     frames = []
     for _ in range(num_frames):
         frames.append(sim.render(resolution))
-        sim.step()
+        sim.step(dt=dt)
     return np.array(frames)
 
 
@@ -449,7 +451,8 @@ def generate_dataset(
     num_barriers: int = 5,
     with_gravity: bool = False,
     resolution: int = 64,
-    base_seed: int = 42
+    base_seed: int = 42,
+    dt: float = 1.0
 ) -> np.ndarray:
     """
     Generate dataset of trajectories.
@@ -461,6 +464,7 @@ def generate_dataset(
         with_gravity: Whether to include gravity
         resolution: Frame resolution
         base_seed: Base random seed
+        dt: Time step per frame (larger = faster motion)
 
     Returns:
         np.ndarray: Shape (num_trajectories, num_frames, H, W)
@@ -473,7 +477,7 @@ def generate_dataset(
             with_gravity=with_gravity,
             seed=base_seed + i
         )
-        frames = generate_trajectory(sim, num_frames, resolution)
+        frames = generate_trajectory(sim, num_frames, resolution, dt=dt)
         dataset.append(frames)
 
     return np.array(dataset)
