@@ -1,264 +1,312 @@
 """
 Video prediction model for physics simulation.
 
-Architecture: CNN Encoder → Transformer → CNN Decoder
-- Encoder compresses each frame to a latent vector
-- Transformer predicts next latent from sequence of latents
-- Decoder reconstructs frame from latent
+Modern transformer architecture (LLaMA-style):
+- RMSNorm instead of LayerNorm
+- SwiGLU activation in MLP
+- Rotary Position Embeddings (RoPE)
+- Pre-normalization
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 
-class FrameEncoder(nn.Module):
-    """Encode a 64x64 frame to a latent vector."""
+class RMSNorm(nn.Module):
+    """Root Mean Square Normalization (faster than LayerNorm)."""
 
-    def __init__(self, latent_dim: int = 256):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        # Bigger encoder with batch norm for faster training
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 64, 4, stride=2, padding=1),    # 64 → 32
-            nn.BatchNorm2d(64),
-            nn.GELU(),
-            nn.Conv2d(64, 128, 4, stride=2, padding=1),  # 32 → 16
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.Conv2d(128, 256, 4, stride=2, padding=1), # 16 → 8
-            nn.BatchNorm2d(256),
-            nn.GELU(),
-            nn.Conv2d(256, 512, 4, stride=2, padding=1), # 8 → 4
-            nn.BatchNorm2d(512),
-            nn.GELU(),
-        )
-        self.fc = nn.Linear(512 * 4 * 4, latent_dim)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # RMS = sqrt(mean(x^2))
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return x / rms * self.weight
+
+
+class RotaryPositionEmbedding(nn.Module):
+    """Rotary Position Embedding (RoPE)."""
+
+    def __init__(self, dim: int, max_seq_len: int = 1024, base: float = 10000.0):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+
+        # Precompute frequency bands
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+        # Precompute cos and sin for all positions
+        self._build_cache(max_seq_len)
+
+    def _build_cache(self, seq_len: int):
+        positions = torch.arange(seq_len, dtype=torch.float)
+        freqs = torch.outer(positions, self.inv_freq)  # (seq_len, dim/2)
+
+        # Create cos and sin caches
+        cos_cache = torch.cos(freqs)  # (seq_len, dim/2)
+        sin_cache = torch.sin(freqs)  # (seq_len, dim/2)
+
+        self.register_buffer('cos_cache', cos_cache, persistent=False)
+        self.register_buffer('sin_cache', sin_cache, persistent=False)
+
+    def forward(self, x: torch.Tensor, offset: int = 0) -> torch.Tensor:
+        """
+        Apply rotary embeddings to input tensor.
+
+        Args:
+            x: (batch, seq_len, n_heads, head_dim) or (batch, n_heads, seq_len, head_dim)
+            offset: position offset for inference
+
+        Returns:
+            Tensor with rotary embeddings applied
+        """
+        seq_len = x.size(-2) if x.dim() == 4 else x.size(1)
+
+        # Extend cache if needed
+        if seq_len + offset > self.max_seq_len:
+            self._build_cache(seq_len + offset)
+
+        cos = self.cos_cache[offset:offset + seq_len]  # (seq_len, dim/2)
+        sin = self.sin_cache[offset:offset + seq_len]  # (seq_len, dim/2)
+
+        return self._apply_rotary(x, cos, sin)
+
+    def _apply_rotary(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        """Apply rotary embedding using the rotation formula."""
+        # Split x into two halves
+        x1, x2 = x[..., :x.size(-1)//2], x[..., x.size(-1)//2:]
+
+        # Reshape cos/sin for broadcasting
+        if x.dim() == 4:  # (batch, n_heads, seq_len, head_dim)
+            cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, dim/2)
+            sin = sin.unsqueeze(0).unsqueeze(0)
+        else:  # (batch, seq_len, dim)
+            cos = cos.unsqueeze(0)  # (1, seq_len, dim/2)
+            sin = sin.unsqueeze(0)
+
+        # Apply rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
+        rotated = torch.cat([
+            x1 * cos - x2 * sin,
+            x1 * sin + x2 * cos
+        ], dim=-1)
+
+        return rotated
+
+
+class Attention(nn.Module):
+    """Multi-head attention with RoPE."""
+
+    def __init__(self, dim: int, n_heads: int, dropout: float = 0.0):
+        super().__init__()
+        assert dim % n_heads == 0
+
+        self.dim = dim
+        self.n_heads = n_heads
+        self.head_dim = dim // n_heads
+
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
+        self.v_proj = nn.Linear(dim, dim, bias=False)
+        self.out_proj = nn.Linear(dim, dim, bias=False)
+
+        self.rope = RotaryPositionEmbedding(self.head_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
-            x: (batch, 1, 64, 64) or (batch, seq, 1, 64, 64)
+            x: (batch, seq_len, dim)
+            mask: optional attention mask
+
         Returns:
-            (batch, latent_dim) or (batch, seq, latent_dim)
+            (batch, seq_len, dim)
         """
-        if x.dim() == 5:
-            # Handle sequence: (batch, seq, 1, 64, 64)
-            b, s, c, h, w = x.shape
-            x = x.view(b * s, c, h, w)
-            z = self.conv(x)
-            z = z.view(b * s, -1)
-            z = self.fc(z)
-            return z.view(b, s, -1)
-        else:
-            # Single frame: (batch, 1, 64, 64)
-            z = self.conv(x)
-            z = z.view(z.size(0), -1)
-            return self.fc(z)
+        batch, seq_len, _ = x.shape
+
+        # Project to Q, K, V
+        q = self.q_proj(x).view(batch, seq_len, self.n_heads, self.head_dim)
+        k = self.k_proj(x).view(batch, seq_len, self.n_heads, self.head_dim)
+        v = self.v_proj(x).view(batch, seq_len, self.n_heads, self.head_dim)
+
+        # Transpose for attention: (batch, n_heads, seq_len, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Apply RoPE to Q and K
+        q = self.rope(q)
+        k = self.rope(k)
+
+        # Scaled dot-product attention
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+        # Apply causal mask
+        if mask is None:
+            # Create causal mask
+            mask = torch.triu(
+                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+                diagonal=1
+            )
+
+        attn_weights = attn_weights.masked_fill(mask, float('-inf'))
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Apply attention to values
+        out = torch.matmul(attn_weights, v)  # (batch, n_heads, seq_len, head_dim)
+
+        # Reshape back
+        out = out.transpose(1, 2).contiguous().view(batch, seq_len, self.dim)
+
+        return self.out_proj(out)
 
 
-class FrameDecoder(nn.Module):
-    """Decode a latent vector to a 64x64 frame."""
+class SwiGLU(nn.Module):
+    """SwiGLU activation: swish(x @ W_gate) * (x @ W_up) @ W_down"""
 
-    def __init__(self, latent_dim: int = 256):
+    def __init__(self, dim: int, hidden_dim: Optional[int] = None, dropout: float = 0.0):
         super().__init__()
-        self.fc = nn.Linear(latent_dim, 512 * 4 * 4)
-        # Bigger decoder with batch norm
-        self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, 4, stride=2, padding=1), # 4 → 8
-            nn.BatchNorm2d(256),
-            nn.GELU(),
-            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1), # 8 → 16
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),  # 16 → 32
-            nn.BatchNorm2d(64),
-            nn.GELU(),
-            nn.ConvTranspose2d(64, 1, 4, stride=2, padding=1),    # 32 → 64
-            nn.Sigmoid(),
-        )
+        hidden_dim = hidden_dim or int(dim * 4 * 2 / 3)  # SwiGLU uses 2/3 * 4x for similar param count
+        # Round to nearest multiple of 64 for efficiency
+        hidden_dim = ((hidden_dim + 63) // 64) * 64
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            z: (batch, latent_dim) or (batch, seq, latent_dim)
-        Returns:
-            (batch, 1, 64, 64) or (batch, seq, 1, 64, 64)
-        """
-        if z.dim() == 3:
-            # Handle sequence
-            b, s, d = z.shape
-            z = z.view(b * s, d)
-            x = self.fc(z)
-            x = x.view(b * s, 512, 4, 4)
-            x = self.deconv(x)
-            return x.view(b, s, 1, 64, 64)
-        else:
-            x = self.fc(z)
-            x = x.view(x.size(0), 512, 4, 4)
-            return self.deconv(x)
-
-
-class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding."""
-
-    def __init__(self, d_model: int, max_len: int = 1000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.w_gate = nn.Linear(dim, hidden_dim, bias=False)
+        self.w_up = nn.Linear(dim, hidden_dim, bias=False)
+        self.w_down = nn.Linear(hidden_dim, dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (batch, seq, d_model)
-        Returns:
-            (batch, seq, d_model)
-        """
-        return x + self.pe[:x.size(1)]
+        gate = F.silu(self.w_gate(x))  # swish = silu
+        up = self.w_up(x)
+        return self.dropout(self.w_down(gate * up))
 
 
-class TemporalTransformer(nn.Module):
-    """Transformer for predicting next latent from sequence of latents."""
+class TransformerBlock(nn.Module):
+    """Transformer block with pre-norm, RoPE attention, and SwiGLU MLP."""
 
-    def __init__(
-        self,
-        latent_dim: int = 256,
-        n_heads: int = 4,
-        n_layers: int = 4,
-        dim_feedforward: int = 512,
-        dropout: float = 0.1,
-        max_seq_len: int = 100
-    ):
+    def __init__(self, dim: int, n_heads: int, dropout: float = 0.0):
         super().__init__()
-        self.latent_dim = latent_dim
+        self.norm1 = RMSNorm(dim)
+        self.attention = Attention(dim, n_heads, dropout)
+        self.norm2 = RMSNorm(dim)
+        self.mlp = SwiGLU(dim, dropout=dropout)
 
-        self.pos_encoding = PositionalEncoding(latent_dim, max_len=max_seq_len)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=latent_dim,
-            nhead=n_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True  # Pre-norm for better training stability
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-
-        # Output projection (predict next latent)
-        self.output_proj = nn.Linear(latent_dim, latent_dim)
-
-    def forward(self, z_seq: torch.Tensor) -> torch.Tensor:
-        """
-        Predict next latent from sequence of latents.
-
-        Args:
-            z_seq: (batch, seq_len, latent_dim) - encoded context frames
-
-        Returns:
-            (batch, latent_dim) - predicted next latent
-        """
-        # Add positional encoding
-        z_seq = self.pos_encoding(z_seq)
-
-        # Causal mask so each position only attends to previous positions
-        seq_len = z_seq.size(1)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=z_seq.device, dtype=torch.bool),
-            diagonal=1
-        )
-
-        # Transformer forward
-        out = self.transformer(z_seq, mask=causal_mask)
-
-        # Take last position and project to predict next latent
-        last_hidden = out[:, -1, :]  # (batch, latent_dim)
-        return self.output_proj(last_hidden)
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = x + self.attention(self.norm1(x), mask)
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
 class VideoPredictor(nn.Module):
     """
-    Full video prediction model.
+    Video prediction model using modern transformer architecture.
 
-    Given a sequence of frames, predicts the next frame.
-    Uses autoregressive rollout for multi-step prediction.
+    Takes a sequence of frames and predicts the next frame.
+    Each frame is flattened to a vector and treated as a token.
     """
 
     def __init__(
         self,
-        latent_dim: int = 256,
-        n_heads: int = 4,
-        n_layers: int = 4,
-        dim_feedforward: int = 512,
+        frame_size: int = 32,
+        n_heads: int = 8,
+        n_layers: int = 6,
         dropout: float = 0.1
     ):
         super().__init__()
-        self.latent_dim = latent_dim
-        self.encoder = FrameEncoder(latent_dim)
-        self.temporal = TemporalTransformer(
-            latent_dim=latent_dim,
-            n_heads=n_heads,
-            n_layers=n_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout
-        )
-        self.decoder = FrameDecoder(latent_dim)
+        self.frame_size = frame_size
+        self.frame_dim = frame_size * frame_size  # 1024 for 32x32
 
-    def forward(self, context_frames: torch.Tensor) -> torch.Tensor:
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(self.frame_dim, n_heads, dropout)
+            for _ in range(n_layers)
+        ])
+
+        # Final normalization
+        self.norm = RMSNorm(self.frame_dim)
+
+        # Output projection (optional, can help with learning)
+        self.output_proj = nn.Linear(self.frame_dim, self.frame_dim, bias=False)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights with small values for stability."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+
+    def forward(self, frames: torch.Tensor) -> torch.Tensor:
         """
-        Predict next frame from context.
+        Predict next frame from context frames.
 
         Args:
-            context_frames: (batch, context_len, 1, 64, 64) - context frames
+            frames: (batch, seq_len, H, W) or (batch, seq_len, 1, H, W)
 
         Returns:
-            (batch, 1, 64, 64) - predicted next frame
+            (batch, H, W) - predicted next frame
         """
-        # Encode context frames
-        z_context = self.encoder(context_frames)  # (batch, context_len, latent_dim)
+        # Handle channel dimension if present
+        if frames.dim() == 5:
+            frames = frames.squeeze(2)  # Remove channel dim
 
-        # Predict next latent
-        z_next = self.temporal(z_context)  # (batch, latent_dim)
+        batch, seq_len, h, w = frames.shape
 
-        # Decode to frame
-        return self.decoder(z_next)  # (batch, 1, 64, 64)
+        # Flatten frames to vectors: (batch, seq_len, frame_dim)
+        x = frames.view(batch, seq_len, -1)
+
+        # Pass through transformer blocks
+        for block in self.blocks:
+            x = block(x)
+
+        # Final norm and projection
+        x = self.norm(x)
+        x = self.output_proj(x)
+
+        # Take last position as prediction
+        pred = x[:, -1, :]  # (batch, frame_dim)
+
+        # Reshape to frame
+        return pred.view(batch, h, w)
 
     def rollout(self, initial_frames: torch.Tensor, n_steps: int) -> torch.Tensor:
         """
         Autoregressive rollout: predict multiple future frames.
 
         Args:
-            initial_frames: (batch, context_len, 1, 64, 64) - initial context
+            initial_frames: (batch, context_len, H, W) or (batch, context_len, 1, H, W)
             n_steps: number of frames to predict
 
         Returns:
-            (batch, n_steps, 1, 64, 64) - predicted frames
+            (batch, n_steps, H, W) - predicted frames
         """
+        # Handle channel dimension if present
+        if initial_frames.dim() == 5:
+            initial_frames = initial_frames.squeeze(2)
+
         predictions = []
         current_context = initial_frames
 
         for _ in range(n_steps):
             # Predict next frame
-            next_frame = self.forward(current_context)  # (batch, 1, 64, 64)
+            next_frame = self.forward(current_context)  # (batch, H, W)
             predictions.append(next_frame)
 
-            # Append prediction to context (keep growing context)
-            next_frame_expanded = next_frame.unsqueeze(1)  # (batch, 1, 1, 64, 64)
-            current_context = torch.cat([current_context, next_frame_expanded], dim=1)
+            # Append prediction to context
+            next_frame = next_frame.unsqueeze(1)  # (batch, 1, H, W)
+            current_context = torch.cat([current_context, next_frame], dim=1)
 
-        return torch.stack(predictions, dim=1)  # (batch, n_steps, 1, 64, 64)
-
-    def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
-        """Encode frames to latent space (for analysis)."""
-        return self.encoder(frames)
-
-    def decode_latent(self, z: torch.Tensor) -> torch.Tensor:
-        """Decode latent to frame (for analysis)."""
-        return self.decoder(z)
+        return torch.stack(predictions, dim=1)  # (batch, n_steps, H, W)
 
 
 def count_parameters(model: nn.Module) -> int:
@@ -268,41 +316,37 @@ def count_parameters(model: nn.Module) -> int:
 
 # Quick test
 if __name__ == "__main__":
-    print("Testing model components...")
+    print("Testing modern VideoPredictor...")
 
-    # Test encoder
-    encoder = FrameEncoder(latent_dim=256)
-    x = torch.randn(2, 1, 64, 64)
-    z = encoder(x)
-    print(f"Encoder: {x.shape} -> {z.shape}")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Test encoder with sequence
-    x_seq = torch.randn(2, 8, 1, 64, 64)  # 8 context frames
-    z_seq = encoder(x_seq)
-    print(f"Encoder (seq): {x_seq.shape} -> {z_seq.shape}")
+    # Create model
+    model = VideoPredictor(
+        frame_size=32,
+        n_heads=8,
+        n_layers=6,
+        dropout=0.1
+    ).to(device)
 
-    # Test decoder
-    decoder = FrameDecoder(latent_dim=256)
-    x_rec = decoder(z)
-    print(f"Decoder: {z.shape} -> {x_rec.shape}")
+    print(f"Model parameters: {count_parameters(model):,}")
 
-    # Test temporal transformer - predict 10 future latents
-    temporal = TemporalTransformer(latent_dim=256)
-    z_future = temporal(z_seq, n_future=10)
-    print(f"Temporal (parallel): {z_seq.shape} + 10 future -> {z_future.shape}")
+    # Test forward pass
+    batch_size = 4
+    seq_len = 10
+    frames = torch.randn(batch_size, seq_len, 32, 32).to(device)
 
-    # Test full model - predict 10 future frames in parallel
-    model = VideoPredictor(latent_dim=256, n_layers=4)
-    pred = model(x_seq, n_future=10)
-    print(f"Full model (parallel): {x_seq.shape} -> {pred.shape}")
+    with torch.no_grad():
+        pred = model(frames)
 
-    # Test rollout (same as forward with n_future)
-    rollout = model.rollout(x_seq, n_steps=20)
-    print(f"Rollout: {x_seq.shape} + 20 steps -> {rollout.shape}")
+    print(f"Input: {frames.shape}")
+    print(f"Output: {pred.shape}")
 
-    # Test predict_next convenience method
-    next_frame = model.predict_next(x_seq)
-    print(f"Predict next: {x_seq.shape} -> {next_frame.shape}")
+    # Test rollout
+    context = frames[:, :5]  # Use first 5 frames as context
+    with torch.no_grad():
+        rollout = model.rollout(context, n_steps=10)
 
-    print(f"\nTotal parameters: {count_parameters(model):,}")
-    print("All tests passed!")
+    print(f"Context: {context.shape}")
+    print(f"Rollout: {rollout.shape}")
+
+    print("\nAll tests passed!")

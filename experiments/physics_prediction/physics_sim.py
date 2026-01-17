@@ -48,8 +48,8 @@ class PhysicsSimulation:
 
     def __init__(
         self,
-        width: int = 64,
-        height: int = 64,
+        width: int = 32,
+        height: int = 32,
         ball: Optional[Ball] = None,
         barriers: Optional[List[Barrier]] = None,
         elasticity: float = 0.9,
@@ -82,11 +82,11 @@ class PhysicsSimulation:
         # Initialize ball
         if ball is None:
             self.ball = Ball(
-                x=np.random.uniform(8, width - 8),
-                y=np.random.uniform(8, height - 8),
-                vx=np.random.uniform(-2, 2),
-                vy=np.random.uniform(-2, 2),
-                radius=3.0
+                x=np.random.uniform(4, width - 4),
+                y=np.random.uniform(4, height - 4),
+                vx=np.random.uniform(-1, 1),
+                vy=np.random.uniform(-1, 1),
+                radius=1.5
             )
         else:
             self.ball = ball.copy()
@@ -133,7 +133,7 @@ class PhysicsSimulation:
         # Handle boundary conditions
         self._handle_boundaries()
 
-    def render(self, resolution: int = 64) -> np.ndarray:
+    def render(self, resolution: int = 32) -> np.ndarray:
         """
         Render current state to grayscale image.
 
@@ -151,13 +151,23 @@ class PhysicsSimulation:
             y2 = int(np.clip(barrier.top, 0, resolution))
             frame[y1:y2, x1:x2] = 0.5
 
-        # Draw ball (hard edges, no anti-aliasing)
-        y_coords, x_coords = np.ogrid[:resolution, :resolution]
-        ball_x = self.ball.x % resolution
-        ball_y = self.ball.y % resolution
-        dist = np.sqrt((x_coords - ball_x)**2 + (y_coords - ball_y)**2)
-        mask = (dist <= self.ball.radius).astype(np.float32)
-        frame = np.maximum(frame, mask)
+        # Draw ball using fixed pre-computed stamp (guarantees identical shape)
+        ball_x = round(self.ball.x) % resolution
+        ball_y = round(self.ball.y) % resolution
+
+        # Create fixed ball stamp centered at origin (computed once per radius)
+        r = int(np.ceil(self.ball.radius))
+        stamp_size = 2 * r + 1
+        cy, cx = np.ogrid[-r:r+1, -r:r+1]
+        stamp = (cx**2 + cy**2 <= self.ball.radius**2).astype(np.float32)
+
+        # Place stamp at ball position with wrapping
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if stamp[dy + r, dx + r] > 0:
+                    py = (ball_y + dy) % resolution
+                    px = (ball_x + dx) % resolution
+                    frame[py, px] = max(frame[py, px], 1.0)
 
         return frame
 
@@ -315,11 +325,11 @@ def _circle_rect_overlap(cx, cy, radius, rx, ry, rw, rh, margin: float = 0) -> b
 
 def generate_random_barriers(
     num_barriers: int,
-    width: int = 64,
-    height: int = 64,
-    min_size: int = 5,
-    max_size: int = 15,
-    margin: float = 2.0,
+    width: int = 32,
+    height: int = 32,
+    min_size: int = 3,
+    max_size: int = 8,
+    margin: float = 1.0,
     exclude_ball: Optional[Tuple[float, float, float]] = None,
     seed: Optional[int] = None
 ) -> List[Barrier]:
@@ -344,7 +354,7 @@ def generate_random_barriers(
 
     barriers = []
     max_attempts = 100
-    edge_margin = 5  # Keep barriers away from edges
+    edge_margin = 2  # Keep barriers away from edges
 
     for _ in range(num_barriers):
         placed = False
@@ -383,12 +393,12 @@ def generate_random_barriers(
 
 
 def create_random_simulation(
-    num_barriers: int = 5,
+    num_barriers: int = 3,
     with_gravity: bool = False,
-    width: int = 64,
-    height: int = 64,
-    ball_radius: float = 3.0,
-    barrier_margin: float = 2.0,
+    width: int = 32,
+    height: int = 32,
+    ball_radius: float = 1.5,
+    barrier_margin: float = 1.0,
     seed: Optional[int] = None
 ) -> PhysicsSimulation:
     """
@@ -410,7 +420,7 @@ def create_random_simulation(
         np.random.seed(seed)
 
     # Generate ball position first
-    edge_margin = ball_radius + 5
+    edge_margin = ball_radius + 2
     ball_x = np.random.uniform(edge_margin, width - edge_margin)
     ball_y = np.random.uniform(edge_margin, height - edge_margin)
 
@@ -428,8 +438,8 @@ def create_random_simulation(
     ball = Ball(
         x=ball_x,
         y=ball_y,
-        vx=np.random.uniform(-1.5, 1.5),
-        vy=np.random.uniform(-1.5, 1.5) if not with_gravity else np.random.uniform(-0.5, 0.5),
+        vx=np.random.uniform(-0.8, 0.8),
+        vy=np.random.uniform(-0.8, 0.8) if not with_gravity else np.random.uniform(-0.3, 0.3),
         radius=ball_radius
     )
 
@@ -448,9 +458,9 @@ def create_random_simulation(
 def generate_dataset(
     num_trajectories: int,
     num_frames: int,
-    num_barriers: int = 5,
+    num_barriers: int = 3,
     with_gravity: bool = False,
-    resolution: int = 64,
+    resolution: int = 32,
     base_seed: int = 42,
     dt: float = 1.0
 ) -> np.ndarray:
@@ -475,6 +485,8 @@ def generate_dataset(
         sim = create_random_simulation(
             num_barriers=num_barriers,
             with_gravity=with_gravity,
+            width=resolution,
+            height=resolution,
             seed=base_seed + i
         )
         frames = generate_trajectory(sim, num_frames, resolution, dt=dt)
