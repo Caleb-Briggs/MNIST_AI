@@ -109,16 +109,16 @@ class PhysicsSimulation:
             # Find earliest collision
             earliest_t = remaining_dt
             collision_barrier = None
-            collision_normal = None
+            collision_side = None
 
             for barrier in self.barriers:
-                result = self._circle_rect_collision_time(self.ball, barrier, remaining_dt)
+                result = self._find_collision(barrier, remaining_dt)
                 if result is not None:
-                    t, normal = result
+                    t, side = result
                     if t < earliest_t:
                         earliest_t = t
                         collision_barrier = barrier
-                        collision_normal = normal
+                        collision_side = side
 
             # Move to collision point (or end of timestep)
             self.ball.x += self.ball.vx * earliest_t
@@ -126,7 +126,7 @@ class PhysicsSimulation:
 
             # Handle collision
             if collision_barrier is not None:
-                self._handle_barrier_collision(collision_barrier, collision_normal)
+                self._reflect_velocity(collision_side)
 
             remaining_dt -= earliest_t
 
@@ -173,96 +173,70 @@ class PhysicsSimulation:
         self.ball = state['ball'].copy()
         self.barriers = [b.copy() for b in state['barriers']]
 
-    def _circle_rect_collision_time(
-        self,
-        ball: Ball,
-        barrier: Barrier,
-        dt: float
-    ) -> Optional[Tuple[float, str]]:
+    def _find_collision(self, barrier: Barrier, dt: float) -> Optional[Tuple[float, str]]:
         """
-        Find collision time between moving circle and static rectangle.
+        Find collision time between circle and rectangle using sweep test.
 
         Returns:
-            (collision_time, normal_direction) or None
-            normal_direction: 'left', 'right', 'top', or 'bottom'
+            (collision_time, side) where side is 'left', 'right', 'top', or 'bottom'
+            Returns None if no collision within dt
         """
-        # Expand rectangle by ball radius (treat ball as point)
-        expanded = Barrier(
-            barrier.x - ball.radius,
-            barrier.y - ball.radius,
-            barrier.width + 2 * ball.radius,
-            barrier.height + 2 * ball.radius
-        )
+        # Current ball position and velocity
+        bx, by = self.ball.x, self.ball.y
+        vx, vy = self.ball.vx, self.ball.vy
+        r = self.ball.radius
 
-        t_min = 0.0
-        t_max = dt
-        collision_normal = None
+        # Barrier bounds
+        x1, x2 = barrier.x, barrier.right
+        y1, y2 = barrier.y, barrier.top
 
-        # X axis
-        if ball.vx != 0:
-            t1 = (expanded.x - ball.x) / ball.vx
-            t2 = (expanded.right - ball.x) / ball.vx
+        # Find potential collision times with each side
+        collision_times = []
 
-            if t1 > t2:
-                t1, t2 = t2, t1
-                entering_from = 'right'
-            else:
-                entering_from = 'left'
+        # Left side (x = x1)
+        if vx > 0:  # Moving right
+            t = (x1 - r - bx) / vx
+            if 0 <= t <= dt:
+                # Check if y position at collision is within barrier height
+                y_at_t = by + vy * t
+                if y1 - r <= y_at_t <= y2 + r:
+                    collision_times.append((t, 'left'))
 
-            if t1 > t_min:
-                t_min = t1
-                collision_normal = entering_from
-            if t2 < t_max:
-                t_max = t2
-        else:
-            if ball.x < expanded.x or ball.x > expanded.right:
-                return None
+        # Right side (x = x2)
+        if vx < 0:  # Moving left
+            t = (x2 + r - bx) / vx
+            if 0 <= t <= dt:
+                y_at_t = by + vy * t
+                if y1 - r <= y_at_t <= y2 + r:
+                    collision_times.append((t, 'right'))
 
-        # Y axis
-        if ball.vy != 0:
-            t1 = (expanded.y - ball.y) / ball.vy
-            t2 = (expanded.top - ball.y) / ball.vy
+        # Bottom side (y = y1)
+        if vy > 0:  # Moving up
+            t = (y1 - r - by) / vy
+            if 0 <= t <= dt:
+                x_at_t = bx + vx * t
+                if x1 - r <= x_at_t <= x2 + r:
+                    collision_times.append((t, 'bottom'))
 
-            if t1 > t2:
-                t1, t2 = t2, t1
-                entering_from_y = 'top'
-            else:
-                entering_from_y = 'bottom'
+        # Top side (y = y2)
+        if vy < 0:  # Moving down
+            t = (y2 + r - by) / vy
+            if 0 <= t <= dt:
+                x_at_t = bx + vx * t
+                if x1 - r <= x_at_t <= x2 + r:
+                    collision_times.append((t, 'top'))
 
-            if t1 > t_min:
-                t_min = t1
-                collision_normal = entering_from_y
-            if t2 < t_max:
-                t_max = t2
-        else:
-            if ball.y < expanded.y or ball.y > expanded.top:
-                return None
-
-        # Check if intersection is valid
-        if t_min > t_max or t_max < 0 or t_min > dt:
-            return None
-
-        if t_min >= 0:
-            return (t_min, collision_normal)
-
+        # Return earliest collision
+        if collision_times:
+            return min(collision_times, key=lambda x: x[0])
         return None
 
-    def _handle_barrier_collision(self, barrier: Barrier, normal: str):
-        """Handle collision with barrier by reflecting velocity."""
-        epsilon = 0.01  # Prevent immediate re-collision
-
-        if normal in ['left', 'right']:
+    def _reflect_velocity(self, side: str):
+        """Reflect velocity based on collision side."""
+        if side in ['left', 'right']:
             self.ball.vx = -self.ball.vx * self.elasticity
-            if normal == 'left':
-                self.ball.x = barrier.x - self.ball.radius - epsilon
-            else:
-                self.ball.x = barrier.right + self.ball.radius + epsilon
         else:  # top or bottom
             self.ball.vy = -self.ball.vy * self.elasticity
-            if normal == 'bottom':
-                self.ball.y = barrier.y - self.ball.radius - epsilon
-            else:
-                self.ball.y = barrier.top + self.ball.radius + epsilon
 
     def _handle_boundaries(self):
         """Handle boundary conditions (wrap or bounce)."""
