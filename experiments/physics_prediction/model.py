@@ -67,7 +67,8 @@ class FrameDecoder(nn.Module):
             nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),   # 16 → 32
             nn.ReLU(),
             nn.ConvTranspose2d(32, 1, 4, stride=2, padding=1),    # 32 → 64
-            nn.Sigmoid(),  # Output in [0, 1]
+            # No activation - let MSE loss guide outputs toward [0,1]
+            # Clamp at inference time if needed
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
