@@ -114,12 +114,7 @@ class PositionalEncoding(nn.Module):
 
 
 class TemporalTransformer(nn.Module):
-    """Transformer for predicting future latents from sequence of latents.
-
-    Supports two modes:
-    1. Single prediction: predict next latent from context
-    2. Parallel prediction: predict multiple future latents at once (for training)
-    """
+    """Transformer for predicting next latent from sequence of latents."""
 
     def __init__(
         self,
@@ -132,13 +127,8 @@ class TemporalTransformer(nn.Module):
     ):
         super().__init__()
         self.latent_dim = latent_dim
-        self.max_seq_len = max_seq_len
 
         self.pos_encoding = PositionalEncoding(latent_dim, max_len=max_seq_len)
-
-        # Learnable query tokens for predicting future positions
-        # These are added to positional encodings when predicting future frames
-        self.future_query = nn.Parameter(torch.randn(1, 1, latent_dim) * 0.02)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=latent_dim,
@@ -150,70 +140,43 @@ class TemporalTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # Output projection (predict latent)
+        # Output projection (predict next latent)
         self.output_proj = nn.Linear(latent_dim, latent_dim)
 
-    def forward(self, z_seq: torch.Tensor, n_future: int = 1, padding_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, z_seq: torch.Tensor) -> torch.Tensor:
         """
-        Predict future latents from context sequence.
+        Predict next latent from sequence of latents.
 
         Args:
-            z_seq: (batch, context_len, latent_dim) - encoded context frames (may include padding)
-            n_future: number of future latents to predict
-            padding_mask: (batch, context_len) - True for padded positions (to be ignored)
+            z_seq: (batch, seq_len, latent_dim) - encoded context frames
 
         Returns:
-            (batch, n_future, latent_dim) - predicted future latents
+            (batch, latent_dim) - predicted next latent
         """
-        batch_size, context_len, _ = z_seq.shape
-        device = z_seq.device
+        # Add positional encoding
+        z_seq = self.pos_encoding(z_seq)
 
-        # Create query tokens for future positions
-        # Shape: (batch, n_future, latent_dim)
-        future_queries = self.future_query.expand(batch_size, n_future, -1)
-
-        # Concatenate context with future queries
-        # Shape: (batch, context_len + n_future, latent_dim)
-        full_seq = torch.cat([z_seq, future_queries], dim=1)
-
-        # Add positional encoding to full sequence
-        full_seq = self.pos_encoding(full_seq)
-
-        # Create causal mask: future queries can see context but not each other
-        total_len = context_len + n_future
-        mask = torch.zeros(total_len, total_len, device=device, dtype=torch.bool)
-
-        # Future positions can only attend to context (not to each other)
-        # This allows parallel prediction while maintaining causality
-        for i in range(n_future):
-            future_idx = context_len + i
-            # Can attend to all context positions
-            # Cannot attend to other future positions
-            mask[future_idx, context_len:] = True
-            mask[future_idx, future_idx] = False  # Can attend to self
-
-        # Extend padding mask to cover future positions (future positions are never padded)
-        if padding_mask is not None:
-            # padding_mask: (batch, context_len) -> (batch, context_len + n_future)
-            future_padding = torch.zeros(batch_size, n_future, device=device, dtype=torch.bool)
-            full_padding_mask = torch.cat([padding_mask, future_padding], dim=1)
-        else:
-            full_padding_mask = None
+        # Causal mask so each position only attends to previous positions
+        seq_len = z_seq.size(1)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=z_seq.device, dtype=torch.bool),
+            diagonal=1
+        )
 
         # Transformer forward
-        out = self.transformer(full_seq, mask=mask, src_key_padding_mask=full_padding_mask)
+        out = self.transformer(z_seq, mask=causal_mask)
 
-        # Extract future predictions and project
-        future_hidden = out[:, context_len:, :]  # (batch, n_future, latent_dim)
-        return self.output_proj(future_hidden)
+        # Take last position and project to predict next latent
+        last_hidden = out[:, -1, :]  # (batch, latent_dim)
+        return self.output_proj(last_hidden)
 
 
 class VideoPredictor(nn.Module):
     """
     Full video prediction model.
 
-    Given a fixed context of frames, predicts future frames.
-    Context is NEVER shifted - the model always conditions on the same initial frames.
+    Given a sequence of frames, predicts the next frame.
+    Uses autoregressive rollout for multi-step prediction.
     """
 
     def __init__(
@@ -236,44 +199,49 @@ class VideoPredictor(nn.Module):
         )
         self.decoder = FrameDecoder(latent_dim)
 
-    def forward(self, context_frames: torch.Tensor, n_future: int = 1, padding_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, context_frames: torch.Tensor) -> torch.Tensor:
         """
-        Predict future frames from context (parallel computation).
+        Predict next frame from context.
 
         Args:
-            context_frames: (batch, context_len, 1, 64, 64) - context frames (may include padding at start)
-            n_future: number of future frames to predict
-            padding_mask: (batch, context_len) - True for padded positions
+            context_frames: (batch, context_len, 1, 64, 64) - context frames
 
         Returns:
-            (batch, n_future, 1, 64, 64) - predicted future frames
+            (batch, 1, 64, 64) - predicted next frame
         """
         # Encode context frames
         z_context = self.encoder(context_frames)  # (batch, context_len, latent_dim)
 
-        # Predict future latents in parallel
-        z_future = self.temporal(z_context, n_future, padding_mask)  # (batch, n_future, latent_dim)
+        # Predict next latent
+        z_next = self.temporal(z_context)  # (batch, latent_dim)
 
-        # Decode to frames
-        return self.decoder(z_future)  # (batch, n_future, 1, 64, 64)
+        # Decode to frame
+        return self.decoder(z_next)  # (batch, 1, 64, 64)
 
-    def predict_next(self, context_frames: torch.Tensor, padding_mask: torch.Tensor = None) -> torch.Tensor:
-        """Convenience method to predict just the next frame."""
-        return self.forward(context_frames, n_future=1, padding_mask=padding_mask).squeeze(1)  # (batch, 1, 64, 64)
-
-    def rollout(self, initial_frames: torch.Tensor, n_steps: int, padding_mask: torch.Tensor = None) -> torch.Tensor:
+    def rollout(self, initial_frames: torch.Tensor, n_steps: int) -> torch.Tensor:
         """
-        Predict multiple future frames from context.
+        Autoregressive rollout: predict multiple future frames.
 
         Args:
-            initial_frames: (batch, context_len, 1, 64, 64) - context frames
+            initial_frames: (batch, context_len, 1, 64, 64) - initial context
             n_steps: number of frames to predict
-            padding_mask: (batch, context_len) - True for padded positions
 
         Returns:
             (batch, n_steps, 1, 64, 64) - predicted frames
         """
-        return self.forward(initial_frames, n_future=n_steps, padding_mask=padding_mask)
+        predictions = []
+        current_context = initial_frames
+
+        for _ in range(n_steps):
+            # Predict next frame
+            next_frame = self.forward(current_context)  # (batch, 1, 64, 64)
+            predictions.append(next_frame)
+
+            # Append prediction to context (keep growing context)
+            next_frame_expanded = next_frame.unsqueeze(1)  # (batch, 1, 1, 64, 64)
+            current_context = torch.cat([current_context, next_frame_expanded], dim=1)
+
+        return torch.stack(predictions, dim=1)  # (batch, n_steps, 1, 64, 64)
 
     def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
         """Encode frames to latent space (for analysis)."""
