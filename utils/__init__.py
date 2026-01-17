@@ -1,1 +1,0 @@
-# MNIST_AI utilities
