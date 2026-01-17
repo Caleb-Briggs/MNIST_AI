@@ -160,7 +160,7 @@ class Attention(nn.Module):
                 diagonal=1
             )
 
-        attn_weights = attn_weights.masked_fill(mask, -1e9)  # Use large negative instead of -inf for numerical stability
+        attn_weights = attn_weights.masked_fill(mask, -65504.0)  # Use float16 min value for mixed precision compatibility
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = torch.nan_to_num(attn_weights, nan=0.0)  # Safety: replace any NaN with 0
         attn_weights = self.dropout(attn_weights)
