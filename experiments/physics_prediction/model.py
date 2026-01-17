@@ -67,8 +67,7 @@ class FrameDecoder(nn.Module):
             nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),   # 16 → 32
             nn.ReLU(),
             nn.ConvTranspose2d(32, 1, 4, stride=2, padding=1),    # 32 → 64
-            # No activation - let MSE loss guide outputs toward [0,1]
-            # Clamp at inference time if needed
+            # No activation - MSE loss guides outputs toward [0,1]
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -115,7 +114,12 @@ class PositionalEncoding(nn.Module):
 
 
 class TemporalTransformer(nn.Module):
-    """Transformer for predicting next latent from sequence of latents."""
+    """Transformer for predicting future latents from sequence of latents.
+
+    Supports two modes:
+    1. Single prediction: predict next latent from context
+    2. Parallel prediction: predict multiple future latents at once (for training)
+    """
 
     def __init__(
         self,
@@ -123,12 +127,18 @@ class TemporalTransformer(nn.Module):
         n_heads: int = 4,
         n_layers: int = 4,
         dim_feedforward: int = 512,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        max_seq_len: int = 100
     ):
         super().__init__()
         self.latent_dim = latent_dim
+        self.max_seq_len = max_seq_len
 
-        self.pos_encoding = PositionalEncoding(latent_dim)
+        self.pos_encoding = PositionalEncoding(latent_dim, max_len=max_seq_len)
+
+        # Learnable query tokens for predicting future positions
+        # These are added to positional encodings when predicting future frames
+        self.future_query = nn.Parameter(torch.randn(1, 1, latent_dim) * 0.02)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=latent_dim,
@@ -140,41 +150,61 @@ class TemporalTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # Output projection (predict next latent)
+        # Output projection (predict latent)
         self.output_proj = nn.Linear(latent_dim, latent_dim)
 
-    def forward(self, z_seq: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, z_seq: torch.Tensor, n_future: int = 1) -> torch.Tensor:
         """
-        Predict next latent from sequence of latents.
+        Predict future latents from context sequence.
 
         Args:
-            z_seq: (batch, seq, latent_dim) - sequence of encoded frames
-            mask: optional causal mask
+            z_seq: (batch, context_len, latent_dim) - encoded context frames
+            n_future: number of future latents to predict
 
         Returns:
-            (batch, latent_dim) - predicted next latent
+            (batch, n_future, latent_dim) - predicted future latents
         """
-        # Add positional encoding
-        z_seq = self.pos_encoding(z_seq)
+        batch_size, context_len, _ = z_seq.shape
+        device = z_seq.device
 
-        # Create causal mask if not provided
-        if mask is None:
-            seq_len = z_seq.size(1)
-            mask = torch.triu(torch.ones(seq_len, seq_len, device=z_seq.device), diagonal=1).bool()
+        # Create query tokens for future positions
+        # Shape: (batch, n_future, latent_dim)
+        future_queries = self.future_query.expand(batch_size, n_future, -1)
+
+        # Concatenate context with future queries
+        # Shape: (batch, context_len + n_future, latent_dim)
+        full_seq = torch.cat([z_seq, future_queries], dim=1)
+
+        # Add positional encoding to full sequence
+        full_seq = self.pos_encoding(full_seq)
+
+        # Create causal mask: future queries can see context but not each other
+        total_len = context_len + n_future
+        mask = torch.zeros(total_len, total_len, device=device, dtype=torch.bool)
+
+        # Future positions can only attend to context (not to each other)
+        # This allows parallel prediction while maintaining causality
+        for i in range(n_future):
+            future_idx = context_len + i
+            # Can attend to all context positions
+            # Cannot attend to other future positions
+            mask[future_idx, context_len:] = True
+            mask[future_idx, future_idx] = False  # Can attend to self
 
         # Transformer forward
-        out = self.transformer(z_seq, src_key_padding_mask=None, mask=mask)
+        out = self.transformer(full_seq, mask=mask)
 
-        # Take last position and project
-        last_hidden = out[:, -1, :]  # (batch, latent_dim)
-        return self.output_proj(last_hidden)
+        # Extract future predictions and project
+        future_hidden = out[:, context_len:, :]  # (batch, n_future, latent_dim)
+        return self.output_proj(future_hidden)
 
 
 class VideoPredictor(nn.Module):
     """
     Full video prediction model.
 
-    Given a sequence of frames, predicts the next frame.
+    Given a fixed context of frames, predicts future frames.
+    Context is NEVER shifted - the model always conditions on the same initial frames.
     """
 
     def __init__(
@@ -186,6 +216,7 @@ class VideoPredictor(nn.Module):
         dropout: float = 0.1
     ):
         super().__init__()
+        self.latent_dim = latent_dim
         self.encoder = FrameEncoder(latent_dim)
         self.temporal = TemporalTransformer(
             latent_dim=latent_dim,
@@ -196,54 +227,45 @@ class VideoPredictor(nn.Module):
         )
         self.decoder = FrameDecoder(latent_dim)
 
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
+    def forward(self, context_frames: torch.Tensor, n_future: int = 1) -> torch.Tensor:
         """
-        Predict next frame from sequence of frames.
+        Predict future frames from fixed context (parallel computation).
 
         Args:
-            frames: (batch, seq, 1, 64, 64) - input frame sequence
+            context_frames: (batch, context_len, 1, 64, 64) - fixed context
+            n_future: number of future frames to predict
 
         Returns:
-            (batch, 1, 64, 64) - predicted next frame
+            (batch, n_future, 1, 64, 64) - predicted future frames
         """
-        # Encode all frames
-        z_seq = self.encoder(frames)  # (batch, seq, latent_dim)
+        # Encode context frames
+        z_context = self.encoder(context_frames)  # (batch, context_len, latent_dim)
 
-        # Predict next latent
-        z_next = self.temporal(z_seq)  # (batch, latent_dim)
+        # Predict future latents in parallel
+        z_future = self.temporal(z_context, n_future)  # (batch, n_future, latent_dim)
 
-        # Decode to frame
-        return self.decoder(z_next)  # (batch, 1, 64, 64)
+        # Decode to frames
+        return self.decoder(z_future)  # (batch, n_future, 1, 64, 64)
+
+    def predict_next(self, context_frames: torch.Tensor) -> torch.Tensor:
+        """Convenience method to predict just the next frame."""
+        return self.forward(context_frames, n_future=1).squeeze(1)  # (batch, 1, 64, 64)
 
     def rollout(self, initial_frames: torch.Tensor, n_steps: int) -> torch.Tensor:
         """
-        Autoregressive rollout: predict multiple future frames.
+        Predict multiple future frames from fixed context.
+
+        Context is FIXED - we don't shift the window. Each future frame
+        is predicted independently from the same context.
 
         Args:
-            initial_frames: (batch, seq, 1, 64, 64) - initial context
+            initial_frames: (batch, context_len, 1, 64, 64) - fixed context
             n_steps: number of frames to predict
 
         Returns:
             (batch, n_steps, 1, 64, 64) - predicted frames
         """
-        device = initial_frames.device
-        batch_size = initial_frames.size(0)
-        context_len = initial_frames.size(1)
-
-        # Start with initial frames
-        current_frames = initial_frames.clone()
-        predictions = []
-
-        for _ in range(n_steps):
-            # Predict next frame
-            next_frame = self.forward(current_frames)  # (batch, 1, 64, 64)
-            predictions.append(next_frame)
-
-            # Shift context window: drop oldest, add prediction
-            next_frame_expanded = next_frame.unsqueeze(1)  # (batch, 1, 1, 64, 64)
-            current_frames = torch.cat([current_frames[:, 1:], next_frame_expanded], dim=1)
-
-        return torch.stack(predictions, dim=1)  # (batch, n_steps, 1, 64, 64)
+        return self.forward(initial_frames, n_future=n_steps)
 
     def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
         """Encode frames to latent space (for analysis)."""
@@ -270,7 +292,7 @@ if __name__ == "__main__":
     print(f"Encoder: {x.shape} -> {z.shape}")
 
     # Test encoder with sequence
-    x_seq = torch.randn(2, 5, 1, 64, 64)
+    x_seq = torch.randn(2, 8, 1, 64, 64)  # 8 context frames
     z_seq = encoder(x_seq)
     print(f"Encoder (seq): {x_seq.shape} -> {z_seq.shape}")
 
@@ -279,19 +301,23 @@ if __name__ == "__main__":
     x_rec = decoder(z)
     print(f"Decoder: {z.shape} -> {x_rec.shape}")
 
-    # Test temporal transformer
+    # Test temporal transformer - predict 10 future latents
     temporal = TemporalTransformer(latent_dim=256)
-    z_next = temporal(z_seq)
-    print(f"Temporal: {z_seq.shape} -> {z_next.shape}")
+    z_future = temporal(z_seq, n_future=10)
+    print(f"Temporal (parallel): {z_seq.shape} + 10 future -> {z_future.shape}")
 
-    # Test full model
+    # Test full model - predict 10 future frames in parallel
     model = VideoPredictor(latent_dim=256, n_layers=4)
-    pred = model(x_seq)
-    print(f"Full model: {x_seq.shape} -> {pred.shape}")
+    pred = model(x_seq, n_future=10)
+    print(f"Full model (parallel): {x_seq.shape} -> {pred.shape}")
 
-    # Test rollout
-    rollout = model.rollout(x_seq, n_steps=10)
-    print(f"Rollout: {x_seq.shape} + 10 steps -> {rollout.shape}")
+    # Test rollout (same as forward with n_future)
+    rollout = model.rollout(x_seq, n_steps=20)
+    print(f"Rollout: {x_seq.shape} + 20 steps -> {rollout.shape}")
+
+    # Test predict_next convenience method
+    next_frame = model.predict_next(x_seq)
+    print(f"Predict next: {x_seq.shape} -> {next_frame.shape}")
 
     print(f"\nTotal parameters: {count_parameters(model):,}")
     print("All tests passed!")
