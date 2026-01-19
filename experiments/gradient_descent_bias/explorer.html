@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Autoencoder Explorer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a1a;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        /* Layout */
+        .app { display: flex; height: 100vh; }
+        .sidebar {
+            width: 300px;
+            background: #12122a;
+            border-right: 1px solid #2a2a4a;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .toolbar {
+            background: #16163a;
+            padding: 10px 15px;
+            border-bottom: 1px solid #2a2a4a;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        .content { flex: 1; overflow: hidden; position: relative; }
+
+        /* Tabs */
+        .tabs { display: flex; background: #0d0d20; }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .tab:hover { background: #1a1a3a; }
+        .tab.active { border-bottom-color: #4fc3f7; color: #4fc3f7; }
+
+        /* Sidebar sections */
+        .sidebar-section {
+            padding: 15px;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        .sidebar-section h3 {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        .sidebar-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+        }
+
+        /* Sample grid */
+        .sample-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 5px;
+        }
+        .sample-item {
+            aspect-ratio: 1;
+            cursor: pointer;
+            border: 2px solid transparent;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .sample-item:hover { border-color: #4fc3f7; }
+        .sample-item.selected { border-color: #ffeb3b; }
+        .sample-item canvas { width: 100%; height: 100%; }
+
+        /* Unit grid */
+        #units-container {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            overflow: auto;
+        }
+        #units-grid {
+            display: grid;
+            gap: 4px;
+            padding: 20px;
+            transform-origin: top left;
+        }
+        .unit-cell {
+            position: relative;
+            cursor: pointer;
+            border: 2px solid transparent;
+            border-radius: 4px;
+            background: #1a1a3a;
+        }
+        .unit-cell:hover { border-color: #4fc3f7; }
+        .unit-cell.selected { border-color: #ffeb3b; }
+        .unit-cell canvas { width: 100%; height: 100%; display: block; }
+        .unit-label {
+            position: absolute;
+            bottom: 2px;
+            left: 2px;
+            font-size: 9px;
+            background: rgba(0,0,0,0.7);
+            padding: 1px 3px;
+            border-radius: 2px;
+        }
+        .unit-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            height: 3px;
+            background: #4fc3f7;
+            border-radius: 0 0 2px 2px;
+        }
+
+        /* Detail panel */
+        #detail-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 400px;
+            max-height: calc(100% - 40px);
+            background: #16163a;
+            border: 1px solid #2a2a4a;
+            border-radius: 8px;
+            overflow: hidden;
+            display: none;
+        }
+        #detail-panel.visible { display: block; }
+        .detail-header {
+            padding: 15px;
+            background: #1a1a4a;
+            border-bottom: 1px solid #2a2a4a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .detail-close {
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+        .detail-close:hover { background: #2a2a5a; }
+        .detail-content {
+            padding: 15px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .detail-row {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        .detail-item { text-align: center; }
+        .detail-item canvas {
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+        }
+        .detail-item label {
+            display: block;
+            font-size: 11px;
+            color: #888;
+            margin-top: 5px;
+        }
+        .detail-stats {
+            font-size: 13px;
+            line-height: 1.8;
+        }
+        .detail-stats strong { color: #4fc3f7; }
+
+        /* Connection view */
+        #connection-canvas {
+            position: absolute;
+            top: 0; left: 0;
+            pointer-events: none;
+        }
+
+        /* Pixel exploration */
+        .pixel-grid-container {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        #pixel-canvas {
+            cursor: crosshair;
+            border: 2px solid #4fc3f7;
+            border-radius: 4px;
+        }
+        .pixel-info {
+            text-align: center;
+            font-size: 14px;
+        }
+        .contributors-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            max-width: 800px;
+        }
+        .contributor {
+            text-align: center;
+            padding: 10px;
+            background: #1a1a3a;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .contributor:hover { background: #2a2a5a; }
+        .contributor canvas { border-radius: 4px; }
+        .contributor-label { font-size: 11px; margin-top: 5px; }
+
+        /* Controls */
+        select, input[type="range"] {
+            background: #1a1a3a;
+            border: 1px solid #2a2a4a;
+            color: #e0e0e0;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+        button {
+            background: #2a2a5a;
+            border: none;
+            color: #e0e0e0;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background: #3a3a7a; }
+        label { font-size: 12px; color: #888; }
+
+        /* Info bar */
+        .info-bar {
+            padding: 10px 15px;
+            background: #0d0d20;
+            border-top: 1px solid #2a2a4a;
+            font-size: 12px;
+            color: #888;
+        }
+
+        /* Loading */
+        #loading {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #0a0a1a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 20px;
+            z-index: 1000;
+        }
+        #loading.hidden { display: none; }
+        .loader {
+            width: 50px;
+            height: 50px;
+            border: 3px solid #2a2a4a;
+            border-top-color: #4fc3f7;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* File input */
+        #file-input-container {
+            text-align: center;
+        }
+        #file-input {
+            display: none;
+        }
+        #file-label {
+            display: inline-block;
+            padding: 15px 30px;
+            background: #2a2a5a;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        #file-label:hover { background: #3a3a7a; }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div id="file-input-container">
+            <h2 style="margin-bottom: 20px;">Autoencoder Explorer</h2>
+            <p style="margin-bottom: 20px; color: #888;">Load JSON data exported from the notebook</p>
+            <input type="file" id="file-input" accept=".json">
+            <label for="file-input" id="file-label">Choose JSON File</label>
+        </div>
+        <div class="loader" style="display: none;" id="loader"></div>
+        <div id="loading-text" style="display: none;">Loading data...</div>
+    </div>
+
+    <div class="app" id="app" style="display: none;">
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <h3>Input Sample</h3>
+                <div class="sample-grid" id="sample-grid"></div>
+            </div>
+            <div class="sidebar-section">
+                <h3>Current Input</h3>
+                <div style="display: flex; gap: 10px;">
+                    <div class="detail-item">
+                        <canvas id="input-preview" width="84" height="84"></canvas>
+                        <label>Input</label>
+                    </div>
+                    <div class="detail-item">
+                        <canvas id="output-preview" width="84" height="84"></canvas>
+                        <label>Reconstruction</label>
+                    </div>
+                    <div class="detail-item">
+                        <canvas id="diff-preview" width="84" height="84"></canvas>
+                        <label>Difference</label>
+                    </div>
+                </div>
+                <div style="margin-top: 10px; font-size: 12px;">
+                    <div>Label: <span id="current-label">-</span></div>
+                    <div>MSE: <span id="current-mse">-</span></div>
+                    <div>Active units: <span id="active-units">-</span></div>
+                </div>
+            </div>
+            <div class="sidebar-scroll">
+                <h3 style="font-size: 12px; color: #888; margin-bottom: 10px;">Top Active Units</h3>
+                <div id="top-active-list"></div>
+            </div>
+        </div>
+
+        <div class="main">
+            <div class="tabs">
+                <div class="tab active" data-tab="units">All Hidden Units</div>
+                <div class="tab" data-tab="input-pixels">Input Pixels</div>
+                <div class="tab" data-tab="output-pixels">Output Pixels</div>
+            </div>
+
+            <div class="toolbar">
+                <label>Sort by:</label>
+                <select id="sort-select">
+                    <option value="importance">Importance</option>
+                    <option value="activation">Current Activation</option>
+                    <option value="index">Unit Index</option>
+                </select>
+                <label>Grid size:</label>
+                <input type="range" id="grid-size" min="30" max="100" value="50">
+                <span id="grid-size-label">50px</span>
+                <button id="toggle-inactive">Show All</button>
+            </div>
+
+            <div class="content">
+                <!-- Units view -->
+                <div id="units-view" class="view-panel">
+                    <div id="units-container">
+                        <div id="units-grid"></div>
+                    </div>
+                    <div id="detail-panel">
+                        <div class="detail-header">
+                            <span id="detail-title">Unit Details</span>
+                            <span class="detail-close" onclick="closeDetail()">&times;</span>
+                        </div>
+                        <div class="detail-content" id="detail-content"></div>
+                    </div>
+                </div>
+
+                <!-- Input pixels view -->
+                <div id="input-pixels-view" class="view-panel" style="display: none;">
+                    <div class="pixel-grid-container">
+                        <div>
+                            <h3 style="margin-bottom: 10px;">Click an input pixel to see which units read from it</h3>
+                            <canvas id="input-pixel-canvas" width="280" height="280"></canvas>
+                        </div>
+                        <div class="pixel-info" id="input-pixel-info">Click a pixel above</div>
+                        <div class="contributors-list" id="input-readers"></div>
+                    </div>
+                </div>
+
+                <!-- Output pixels view -->
+                <div id="output-pixels-view" class="view-panel" style="display: none;">
+                    <div class="pixel-grid-container">
+                        <div>
+                            <h3 style="margin-bottom: 10px;">Click an output pixel to see which units write to it</h3>
+                            <canvas id="output-pixel-canvas" width="280" height="280"></canvas>
+                        </div>
+                        <div class="pixel-info" id="output-pixel-info">Click a pixel above</div>
+                        <div class="contributors-list" id="output-writers"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-bar">
+                <span id="info-text">Load a JSON file to begin</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    let DATA = null;
+    let EPOCH_DATA = null;  // Current epoch's data
+    let currentEpochIdx = 0;
+    let activations = [];
+    let reconstruction = [];
+    let selectedSample = 0;
+    let selectedUnit = null;
+    let sortBy = 'importance';
+    let gridSize = 50;
+    let showInactive = true;
+
+    // File loading
+    document.getElementById('file-input').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        document.getElementById('file-input-container').style.display = 'none';
+        document.getElementById('loader').style.display = 'block';
+        document.getElementById('loading-text').style.display = 'block';
+
+        const text = await file.text();
+        DATA = JSON.parse(text);
+
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('app').style.display = 'flex';
+
+        init();
+    });
+
+    function init() {
+        // Handle both old single-epoch and new multi-epoch formats
+        if (DATA.epochs) {
+            // New multi-epoch format
+            currentEpochIdx = 0;
+            EPOCH_DATA = DATA.epochs[currentEpochIdx];
+            setupEpochSelector();
+        } else {
+            // Old single-epoch format (backwards compatible)
+            EPOCH_DATA = DATA;
+        }
+
+        renderSamples();
+        selectSample(0);
+        setupEventListeners();
+        updateInfoBar();
+    }
+
+    function setupEpochSelector() {
+        // Add epoch selector to toolbar
+        const toolbar = document.querySelector('.toolbar');
+        const epochDiv = document.createElement('div');
+        epochDiv.innerHTML = `
+            <label>Epoch:</label>
+            <select id="epoch-select"></select>
+        `;
+        toolbar.insertBefore(epochDiv, toolbar.firstChild);
+
+        const select = document.getElementById('epoch-select');
+        DATA.available_epochs.forEach((epoch, idx) => {
+            const opt = document.createElement('option');
+            opt.value = idx;
+            opt.textContent = epoch;
+            select.appendChild(opt);
+        });
+
+        // Default to last epoch
+        currentEpochIdx = DATA.epochs.length - 1;
+        select.value = currentEpochIdx;
+        EPOCH_DATA = DATA.epochs[currentEpochIdx];
+
+        select.onchange = (e) => {
+            currentEpochIdx = parseInt(e.target.value);
+            EPOCH_DATA = DATA.epochs[currentEpochIdx];
+            computeForwardPass();
+            updatePreviews();
+            renderUnits();
+            updateTopActiveList();
+            updateInfoBar();
+            if (selectedUnit !== null) {
+                showUnitDetail(selectedUnit);
+            }
+        };
+    }
+
+    function setupEventListeners() {
+        // Tabs
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.onclick = () => switchTab(tab.dataset.tab);
+        });
+
+        // Sort
+        document.getElementById('sort-select').onchange = (e) => {
+            sortBy = e.target.value;
+            renderUnits();
+        };
+
+        // Grid size
+        document.getElementById('grid-size').oninput = (e) => {
+            gridSize = parseInt(e.target.value);
+            document.getElementById('grid-size-label').textContent = gridSize + 'px';
+            renderUnits();
+        };
+
+        // Toggle inactive
+        document.getElementById('toggle-inactive').onclick = () => {
+            showInactive = !showInactive;
+            document.getElementById('toggle-inactive').textContent = showInactive ? 'Show All' : 'Active Only';
+            renderUnits();
+        };
+
+        // Input pixel canvas
+        document.getElementById('input-pixel-canvas').onclick = (e) => {
+            const rect = e.target.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / 10);
+            const y = Math.floor((e.clientY - rect.top) / 10);
+            showInputPixelReaders(y * 28 + x);
+        };
+
+        // Output pixel canvas
+        document.getElementById('output-pixel-canvas').onclick = (e) => {
+            const rect = e.target.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / 10);
+            const y = Math.floor((e.clientY - rect.top) / 10);
+            showOutputPixelWriters(y * 28 + x);
+        };
+    }
+
+    function switchTab(tabName) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+        document.querySelectorAll('.view-panel').forEach(p => p.style.display = 'none');
+        document.getElementById(tabName + '-view').style.display = 'block';
+
+        if (tabName === 'input-pixels') {
+            drawPixelCanvas('input-pixel-canvas', DATA.sample_images[selectedSample]);
+        } else if (tabName === 'output-pixels') {
+            drawPixelCanvas('output-pixel-canvas', reconstruction);
+        }
+    }
+
+    function renderSamples() {
+        const grid = document.getElementById('sample-grid');
+        grid.innerHTML = '';
+
+        const numSamples = Math.min(50, DATA.sample_images.length);
+        for (let i = 0; i < numSamples; i++) {
+            const div = document.createElement('div');
+            div.className = 'sample-item';
+            div.onclick = () => selectSample(i);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 28;
+            canvas.height = 28;
+            drawImage(canvas, DATA.sample_images[i]);
+            div.appendChild(canvas);
+            grid.appendChild(div);
+        }
+    }
+
+    function selectSample(idx) {
+        selectedSample = idx;
+        document.querySelectorAll('.sample-item').forEach((el, i) => {
+            el.classList.toggle('selected', i === idx);
+        });
+
+        computeForwardPass();
+        updatePreviews();
+        renderUnits();
+        updateTopActiveList();
+
+        // Update pixel canvases if visible
+        const inputPixelCanvas = document.getElementById('input-pixel-canvas');
+        if (inputPixelCanvas.offsetParent) {
+            drawPixelCanvas('input-pixel-canvas', DATA.sample_images[selectedSample]);
+        }
+        const outputPixelCanvas = document.getElementById('output-pixel-canvas');
+        if (outputPixelCanvas.offsetParent) {
+            drawPixelCanvas('output-pixel-canvas', reconstruction);
+        }
+    }
+
+    function computeForwardPass() {
+        const img = DATA.sample_images[selectedSample];
+
+        // Compute activations for ALL units
+        activations = new Array(DATA.hidden_dim);
+        for (let i = 0; i < DATA.hidden_dim; i++) {
+            let sum = EPOCH_DATA.enc_bias[i];
+            for (let j = 0; j < 784; j++) {
+                sum += img[j] * EPOCH_DATA.enc_weights[i][j];
+            }
+            activations[i] = Math.max(0, sum); // ReLU
+        }
+
+        // Compute reconstruction
+        reconstruction = new Array(784);
+        for (let j = 0; j < 784; j++) {
+            reconstruction[j] = EPOCH_DATA.dec_bias[j];
+            for (let i = 0; i < DATA.hidden_dim; i++) {
+                reconstruction[j] += activations[i] * EPOCH_DATA.dec_weights[i][j];
+            }
+        }
+    }
+
+    function updatePreviews() {
+        const img = DATA.sample_images[selectedSample];
+
+        drawImage(document.getElementById('input-preview'), img, 3);
+        drawImage(document.getElementById('output-preview'), reconstruction, 3);
+
+        const diff = img.map((v, i) => v - reconstruction[i]);
+        drawDiff(document.getElementById('diff-preview'), diff, 3);
+
+        const mse = diff.reduce((s, v) => s + v*v, 0) / 784;
+        const activeCount = activations.filter(a => a > 0).length;
+
+        document.getElementById('current-label').textContent = DATA.sample_labels ? DATA.sample_labels[selectedSample] : '?';
+        document.getElementById('current-mse').textContent = mse.toFixed(6);
+        document.getElementById('active-units').textContent = activeCount + ' / ' + DATA.hidden_dim;
+    }
+
+    function renderUnits() {
+        const grid = document.getElementById('units-grid');
+        grid.innerHTML = '';
+
+        // Get sort order
+        let indices = [...Array(DATA.hidden_dim).keys()];
+        if (sortBy === 'importance') {
+            indices = [...EPOCH_DATA.importance_order];
+        } else if (sortBy === 'activation') {
+            indices.sort((a, b) => activations[b] - activations[a]);
+        }
+
+        // Filter if needed
+        if (!showInactive) {
+            indices = indices.filter(i => activations[i] > 0);
+        }
+
+        // Set grid columns based on size
+        const cols = Math.floor((window.innerWidth - 300) / (gridSize + 4));
+        grid.style.gridTemplateColumns = `repeat(${cols}, ${gridSize}px)`;
+
+        const maxAct = Math.max(...activations, 0.001);
+
+        indices.forEach((unitIdx, rank) => {
+            const div = document.createElement('div');
+            div.className = 'unit-cell';
+            div.style.width = gridSize + 'px';
+            div.style.height = gridSize + 'px';
+            div.onclick = () => showUnitDetail(unitIdx);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = gridSize;
+            canvas.height = gridSize;
+            drawWeights(canvas, EPOCH_DATA.enc_weights[unitIdx]);
+            div.appendChild(canvas);
+
+            const label = document.createElement('div');
+            label.className = 'unit-label';
+            label.textContent = '#' + unitIdx;
+            div.appendChild(label);
+
+            const bar = document.createElement('div');
+            bar.className = 'unit-bar';
+            bar.style.width = (activations[unitIdx] / maxAct * 100) + '%';
+            bar.style.opacity = activations[unitIdx] > 0 ? 1 : 0;
+            div.appendChild(bar);
+
+            if (selectedUnit === unitIdx) {
+                div.classList.add('selected');
+            }
+
+            grid.appendChild(div);
+        });
+    }
+
+    function updateTopActiveList() {
+        const list = document.getElementById('top-active-list');
+        list.innerHTML = '';
+
+        const sorted = activations
+            .map((a, i) => ({act: a, idx: i}))
+            .filter(u => u.act > 0)
+            .sort((a, b) => b.act - a.act)
+            .slice(0, 15);
+
+        sorted.forEach((u, rank) => {
+            const div = document.createElement('div');
+            div.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 5px; cursor: pointer; border-radius: 4px;';
+            div.onmouseover = () => div.style.background = '#2a2a5a';
+            div.onmouseout = () => div.style.background = 'transparent';
+            div.onclick = () => showUnitDetail(u.idx);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 28;
+            canvas.height = 28;
+            canvas.style.cssText = 'width: 28px; height: 28px; border-radius: 2px;';
+            drawWeights(canvas, EPOCH_DATA.enc_weights[u.idx]);
+            div.appendChild(canvas);
+
+            const info = document.createElement('div');
+            info.style.cssText = 'font-size: 11px; flex: 1;';
+            info.innerHTML = `<strong>#${u.idx}</strong><br>Act: ${u.act.toFixed(3)}`;
+            div.appendChild(info);
+
+            list.appendChild(div);
+        });
+    }
+
+    function showUnitDetail(unitIdx) {
+        selectedUnit = unitIdx;
+        renderUnits(); // Update selection highlight
+
+        const panel = document.getElementById('detail-panel');
+        panel.classList.add('visible');
+
+        document.getElementById('detail-title').textContent = `Unit #${unitIdx}`;
+
+        const content = document.getElementById('detail-content');
+        content.innerHTML = `
+            <div class="detail-row">
+                <div class="detail-item">
+                    <canvas id="detail-enc" width="112" height="112"></canvas>
+                    <label>Encoder (what it looks for)</label>
+                </div>
+                <div class="detail-item">
+                    <canvas id="detail-dec" width="112" height="112"></canvas>
+                    <label>Decoder (what it outputs)</label>
+                </div>
+                <div class="detail-item">
+                    <canvas id="detail-contrib" width="112" height="112"></canvas>
+                    <label>Current contribution</label>
+                </div>
+            </div>
+            <div class="detail-stats">
+                <strong>Unit index:</strong> ${unitIdx}<br>
+                <strong>Importance rank:</strong> #${EPOCH_DATA.importance_order.indexOf(unitIdx) + 1}<br>
+                <strong>Importance score:</strong> ${EPOCH_DATA.importance_scores[unitIdx].toFixed(2)}<br>
+                <strong>Current activation:</strong> ${activations[unitIdx].toFixed(4)}<br>
+                <strong>Mean activation:</strong> ${EPOCH_DATA.mean_activations[unitIdx].toFixed(4)}<br>
+                <strong>Encoder norm:</strong> ${EPOCH_DATA.enc_norms[unitIdx].toFixed(3)}<br>
+                <strong>Decoder norm:</strong> ${EPOCH_DATA.dec_norms[unitIdx].toFixed(3)}
+            </div>
+            <h4 style="margin: 15px 0 10px; font-size: 12px; color: #888;">Top Input Connections (by weight)</h4>
+            <div id="input-connections" style="display: flex; flex-wrap: wrap; gap: 5px;"></div>
+            <h4 style="margin: 15px 0 10px; font-size: 12px; color: #888;">Top Output Connections (by weight)</h4>
+            <div id="output-connections" style="display: flex; flex-wrap: wrap; gap: 5px;"></div>
+        `;
+
+        drawWeights(document.getElementById('detail-enc'), EPOCH_DATA.enc_weights[unitIdx], 4);
+        drawWeights(document.getElementById('detail-dec'), EPOCH_DATA.dec_weights[unitIdx], 4);
+
+        const contrib = EPOCH_DATA.dec_weights[unitIdx].map(w => w * activations[unitIdx]);
+        drawWeights(document.getElementById('detail-contrib'), contrib, 4);
+
+        // Show top input connections
+        const encWeights = EPOCH_DATA.enc_weights[unitIdx];
+        const topInputs = encWeights
+            .map((w, i) => ({w: Math.abs(w), i, sign: w}))
+            .sort((a, b) => b.w - a.w)
+            .slice(0, 10);
+
+        const inputConn = document.getElementById('input-connections');
+        topInputs.forEach(({w, i, sign}) => {
+            const div = document.createElement('div');
+            div.style.cssText = `
+                width: 40px; text-align: center; padding: 3px;
+                background: ${sign > 0 ? '#1a3a1a' : '#3a1a1a'}; border-radius: 4px;
+            `;
+            div.innerHTML = `
+                <div style="font-size: 10px;">(${Math.floor(i/28)},${i%28})</div>
+                <div style="font-size: 9px; color: #888;">${sign > 0 ? '+' : ''}${sign.toFixed(2)}</div>
+            `;
+            inputConn.appendChild(div);
+        });
+
+        // Show top output connections
+        const decWeights = EPOCH_DATA.dec_weights[unitIdx];
+        const topOutputs = decWeights
+            .map((w, i) => ({w: Math.abs(w), i, sign: w}))
+            .sort((a, b) => b.w - a.w)
+            .slice(0, 10);
+
+        const outputConn = document.getElementById('output-connections');
+        topOutputs.forEach(({w, i, sign}) => {
+            const div = document.createElement('div');
+            div.style.cssText = `
+                width: 40px; text-align: center; padding: 3px;
+                background: ${sign > 0 ? '#1a3a1a' : '#3a1a1a'}; border-radius: 4px;
+            `;
+            div.innerHTML = `
+                <div style="font-size: 10px;">(${Math.floor(i/28)},${i%28})</div>
+                <div style="font-size: 9px; color: #888;">${sign > 0 ? '+' : ''}${sign.toFixed(2)}</div>
+            `;
+            outputConn.appendChild(div);
+        });
+    }
+
+    function closeDetail() {
+        document.getElementById('detail-panel').classList.remove('visible');
+        selectedUnit = null;
+        renderUnits();
+    }
+
+    function showInputPixelReaders(pixelIdx) {
+        const row = Math.floor(pixelIdx / 28);
+        const col = pixelIdx % 28;
+
+        document.getElementById('input-pixel-info').innerHTML =
+            `<strong>Input pixel (${row}, ${col})</strong> - Units that read from this pixel:`;
+
+        // Find units with strongest weights for this input pixel
+        const readers = EPOCH_DATA.enc_weights
+            .map((weights, unitIdx) => ({
+                unitIdx,
+                weight: weights[pixelIdx],
+                absWeight: Math.abs(weights[pixelIdx]),
+                activation: activations[unitIdx]
+            }))
+            .sort((a, b) => b.absWeight - a.absWeight)
+            .slice(0, 20);
+
+        const container = document.getElementById('input-readers');
+        container.innerHTML = '';
+
+        readers.forEach(({unitIdx, weight, activation}) => {
+            const div = document.createElement('div');
+            div.className = 'contributor';
+            div.onclick = () => { switchTab('units'); showUnitDetail(unitIdx); };
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 56;
+            canvas.height = 56;
+            drawWeights(canvas, EPOCH_DATA.enc_weights[unitIdx], 2);
+            div.appendChild(canvas);
+
+            const label = document.createElement('div');
+            label.className = 'contributor-label';
+            label.innerHTML = `#${unitIdx}<br>w=${weight.toFixed(3)}<br>act=${activation.toFixed(3)}`;
+            div.appendChild(label);
+
+            container.appendChild(div);
+        });
+
+        // Highlight the pixel on canvas
+        drawPixelCanvas('input-pixel-canvas', DATA.sample_images[selectedSample], pixelIdx);
+    }
+
+    function showOutputPixelWriters(pixelIdx) {
+        const row = Math.floor(pixelIdx / 28);
+        const col = pixelIdx % 28;
+
+        document.getElementById('output-pixel-info').innerHTML =
+            `<strong>Output pixel (${row}, ${col})</strong> - Units that write to this pixel:`;
+
+        // Find units with strongest weights for this output pixel
+        const writers = EPOCH_DATA.dec_weights
+            .map((weights, unitIdx) => ({
+                unitIdx,
+                weight: weights[pixelIdx],
+                absWeight: Math.abs(weights[pixelIdx]),
+                activation: activations[unitIdx],
+                contribution: weights[pixelIdx] * activations[unitIdx]
+            }))
+            .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
+            .slice(0, 20);
+
+        const container = document.getElementById('output-writers');
+        container.innerHTML = '';
+
+        writers.forEach(({unitIdx, weight, activation, contribution}) => {
+            const div = document.createElement('div');
+            div.className = 'contributor';
+            div.onclick = () => { switchTab('units'); showUnitDetail(unitIdx); };
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 56;
+            canvas.height = 56;
+            drawWeights(canvas, EPOCH_DATA.dec_weights[unitIdx], 2);
+            div.appendChild(canvas);
+
+            const label = document.createElement('div');
+            label.className = 'contributor-label';
+            label.innerHTML = `#${unitIdx}<br>contrib=${contribution.toFixed(3)}`;
+            div.appendChild(label);
+
+            container.appendChild(div);
+        });
+
+        // Highlight the pixel on canvas
+        drawPixelCanvas('output-pixel-canvas', reconstruction, pixelIdx);
+    }
+
+    function drawPixelCanvas(canvasId, data, highlightPixel = -1) {
+        const canvas = document.getElementById(canvasId);
+        const ctx = canvas.getContext('2d');
+        const scale = 10;
+
+        for (let y = 0; y < 28; y++) {
+            for (let x = 0; x < 28; x++) {
+                const idx = y * 28 + x;
+                const v = Math.max(0, Math.min(255, data[idx] * 255));
+                ctx.fillStyle = `rgb(${v},${v},${v})`;
+                ctx.fillRect(x * scale, y * scale, scale, scale);
+            }
+        }
+
+        if (highlightPixel >= 0) {
+            const hx = highlightPixel % 28;
+            const hy = Math.floor(highlightPixel / 28);
+            ctx.strokeStyle = '#ffeb3b';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(hx * scale, hy * scale, scale, scale);
+        }
+    }
+
+    function drawImage(canvas, data, scale = 1) {
+        const ctx = canvas.getContext('2d');
+        const w = 28, h = 28;
+        const imgData = ctx.createImageData(w * scale, h * scale);
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const v = Math.max(0, Math.min(255, data[y * w + x] * 255));
+                for (let sy = 0; sy < scale; sy++) {
+                    for (let sx = 0; sx < scale; sx++) {
+                        const i = ((y * scale + sy) * w * scale + (x * scale + sx)) * 4;
+                        imgData.data[i] = imgData.data[i+1] = imgData.data[i+2] = v;
+                        imgData.data[i+3] = 255;
+                    }
+                }
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+    }
+
+    function drawWeights(canvas, data, scale = null) {
+        const ctx = canvas.getContext('2d');
+        const w = 28, h = 28;
+
+        if (!scale) {
+            scale = Math.floor(canvas.width / 28);
+        }
+
+        const maxAbs = Math.max(...data.map(Math.abs), 0.001);
+        const imgData = ctx.createImageData(w * scale, h * scale);
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const v = data[y * w + x] / maxAbs;
+                const r = v > 0 ? Math.floor(128 + v * 127) : Math.floor(128 + v * 60);
+                const g = Math.floor(128 - Math.abs(v) * 60);
+                const b = v < 0 ? Math.floor(128 - v * 127) : Math.floor(128 - v * 60);
+
+                for (let sy = 0; sy < scale; sy++) {
+                    for (let sx = 0; sx < scale; sx++) {
+                        const i = ((y * scale + sy) * w * scale + (x * scale + sx)) * 4;
+                        imgData.data[i] = r;
+                        imgData.data[i+1] = g;
+                        imgData.data[i+2] = b;
+                        imgData.data[i+3] = 255;
+                    }
+                }
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+    }
+
+    function drawDiff(canvas, data, scale = 1) {
+        const ctx = canvas.getContext('2d');
+        const w = 28, h = 28;
+        const maxAbs = Math.max(...data.map(Math.abs), 0.001);
+        const imgData = ctx.createImageData(w * scale, h * scale);
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const v = data[y * w + x] / maxAbs;
+                const r = v > 0 ? Math.floor(v * 255) : 0;
+                const b = v < 0 ? Math.floor(-v * 255) : 0;
+
+                for (let sy = 0; sy < scale; sy++) {
+                    for (let sx = 0; sx < scale; sx++) {
+                        const i = ((y * scale + sy) * w * scale + (x * scale + sx)) * 4;
+                        imgData.data[i] = r;
+                        imgData.data[i+1] = 0;
+                        imgData.data[i+2] = b;
+                        imgData.data[i+3] = 255;
+                    }
+                }
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+    }
+
+    function updateInfoBar() {
+        const epochInfo = EPOCH_DATA.epoch !== undefined ? `Epoch ${EPOCH_DATA.epoch}` : '';
+        const availableEpochs = DATA.available_epochs ? ` (${DATA.available_epochs.length} epochs available)` : '';
+        document.getElementById('info-text').textContent =
+            `${epochInfo}${availableEpochs} | ${DATA.hidden_dim} hidden units | ${DATA.sample_images.length} samples`;
+    }
+    </script>
+</body>
+</html>
